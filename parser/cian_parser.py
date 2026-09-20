@@ -15,11 +15,12 @@ START_URL = f"https://{REGION}.cian.ru/"
 CHECK_WORD = "Купить квартиру"
 COOKIES_FILE = "browser/cookies.json"
 HEADERS_FILE = "browser/headers.json"
-CITY = "novosibirsk"
 LISTING_TYPE = "sale"
 PROPERTY_TYPE = "flat"
 RANDOM_RANGE_START = 300000000
 RANDOM_RANGE_END = 400000000
+START_ID = 329497673
+MAX_WAIT = 10
 
 
 async def get_browser_attributes() -> None:
@@ -70,22 +71,24 @@ async def get_session() -> requests.AsyncSession:
     return session
 
 
-def get_cian_url(city: str, property_type: str, listing_type: str, listing_id: int) -> str:
-    """Возвращает url-строку объявления сайта cian.ru"""
-
-    return f"https://{city}.cian.ru/{listing_type}/{property_type}/{listing_id}"
-
-
-async def get_listing_data(session: AsyncSession, url: str) -> dict:
+async def get_listing_data(session: AsyncSession, listing_id: int) -> dict:
     """Возвращает информацию из объявления в виде словаря"""
 
+    url = f"https://{REGION}.cian.ru/{LISTING_TYPE}/{PROPERTY_TYPE}/{listing_id}"
     response = await session.get(url)
+    if response.status_code == 403:
+        logger.error("Запрос с id=%d был отклонен сервером cian.ru. Статус-код 403", listing_id)
+        return {"parsing_status": "forbidden"}
     soup = BeautifulSoup(response.text, "html.parser")
     scripts = soup.find_all("script")
     for script in scripts:
         text = script.get_text()
         if "offerData" in text:
             try:
+                additional_response = await session.post(
+                    "https://api.cian.ru/search-engine/v3/get-similar-offers/", json={"cianOfferId": listing_id}
+                )
+                additional_offers = [offer.get("cianId") for offer in additional_response.json().get("offers", list())]
                 script_tail = [part for part in text.split(".concat(") if "offerData" in part][0].split('offerData":')[
                     1
                 ]
@@ -99,6 +102,7 @@ async def get_listing_data(session: AsyncSession, url: str) -> dict:
                             json_body = script_tail[: i + 1]
                             result = cast(dict, json.loads(json_body))
                             result["parsing_status"] = "success"
+                            result["additional_offers"] = additional_offers
                             return result
             except Exception as exc:
                 logger.critical("Возникла ошибка при извлечении данных:\n%s", exc)
@@ -106,16 +110,39 @@ async def get_listing_data(session: AsyncSession, url: str) -> dict:
     return {"parsing_status": "empty_response"}
 
 
+def clean_listing_data(listing_data: dict) -> None:
+    """Извлекает необходимую информацию из словаря-объявления"""
+
+    status = listing_data.get("parsing_status")
+    if status == "success":
+        print(listing_data.keys())
+
+
 async def get_data() -> None:
-    current_session = await get_session()
-    while True:
-        listing_id = randint(RANDOM_RANGE_START, RANDOM_RANGE_END)
-        url = get_cian_url(CITY, PROPERTY_TYPE, LISTING_TYPE, listing_id)
-        data = await get_listing_data(current_session, url)
+    """Собирает информацию об объектах недвижимости с сайта cian.ru"""
 
-        print(data)
-
-        await asyncio.sleep(1)
+    session = await get_session()
+    explored = set()
+    to_explore = list()
+    async with session:
+        data = await get_listing_data(session, START_ID)
+        clean_listing_data(data)
+        additional_ids = data.get("additional_offers", list())
+        to_explore.extend(additional_ids)
+        random_sleep = randint(1, MAX_WAIT)
+        await asyncio.sleep(random_sleep)
+        while len(to_explore) > 0:
+            next_id = to_explore.pop(-1)
+            explored.add(next_id)
+            data = await get_listing_data(session, next_id)
+            status = data.get("parsing_status")
+            if status == "forbidden":
+                break
+            clean_listing_data(data)
+            additional_ids = set(data.get("additional_offers", list())).difference(explored)
+            to_explore.extend(list(additional_ids))
+            random_sleep = randint(1, MAX_WAIT)
+            await asyncio.sleep(random_sleep)
 
 
 if __name__ == "__main__":
