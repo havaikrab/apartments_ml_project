@@ -8,7 +8,9 @@ import zendriver as zd
 from bs4 import BeautifulSoup
 from curl_cffi import AsyncSession, requests
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+
 
 REGION = "novosibirsk"
 START_URL = f"https://{REGION}.cian.ru/"
@@ -17,9 +19,7 @@ COOKIES_FILE = "browser/cookies.json"
 HEADERS_FILE = "browser/headers.json"
 LISTING_TYPE = "sale"
 PROPERTY_TYPE = "flat"
-RANDOM_RANGE_START = 300000000
-RANDOM_RANGE_END = 400000000
-START_ID = 329497673
+START_ID = 329888192
 MAX_WAIT = 10
 
 
@@ -68,10 +68,11 @@ async def get_session() -> requests.AsyncSession:
     session = AsyncSession(impersonate="chrome")
     session.cookies.update(cookies)
     session.headers = headers
+    logger.info("Сессия обновлена")
     return session
 
 
-async def get_listing_data(session: AsyncSession, listing_id: int) -> dict:
+async def get_listing_data(session: AsyncSession, listing_id: int, update: bool) -> dict:
     """Возвращает информацию из объявления в виде словаря"""
 
     url = f"https://{REGION}.cian.ru/{LISTING_TYPE}/{PROPERTY_TYPE}/{listing_id}"
@@ -85,10 +86,6 @@ async def get_listing_data(session: AsyncSession, listing_id: int) -> dict:
         text = script.get_text()
         if "offerData" in text:
             try:
-                additional_response = await session.post(
-                    "https://api.cian.ru/search-engine/v3/get-similar-offers/", json={"cianOfferId": listing_id}
-                )
-                additional_offers = [offer.get("cianId") for offer in additional_response.json().get("offers", list())]
                 script_tail = [part for part in text.split(".concat(") if "offerData" in part][0].split('offerData":')[
                     1
                 ]
@@ -102,11 +99,29 @@ async def get_listing_data(session: AsyncSession, listing_id: int) -> dict:
                             json_body = script_tail[: i + 1]
                             result = cast(dict, json.loads(json_body))
                             result["parsing_status"] = "success"
-                            result["additional_offers"] = additional_offers
+                            result["additional_offers"] = list()
+                            result["source"] = f"https://{REGION}.cian.ru"
+                            result["url"] = url
+                            if update:
+                                additional_response = await session.post(
+                                    "https://api.cian.ru/search-engine/v3/get-similar-offers/",
+                                    json={"cianOfferId": listing_id},
+                                )
+                                additional_ids = [
+                                    offer.get("cianId") for offer in additional_response.json().get("offers", list())
+                                ]
+                                similar_listings = result.get("similarNewObjects", list())
+                                similar_ids = [
+                                    offer.get("id") for offer in similar_listings if isinstance(offer.get("id"), int)
+                                ]
+                                result["additional_offers"].extend(additional_ids)
+                                result["additional_offers"].extend(similar_ids)
+                            logger.info("Данные успешно получены")
                             return result
             except Exception as exc:
                 logger.critical("Возникла ошибка при извлечении данных:\n%s", exc)
                 return {"parsing_status": "internal_error"}
+    logger.error("Запрос не вернул ожидаемых данных")
     return {"parsing_status": "empty_response"}
 
 
@@ -115,7 +130,79 @@ def clean_listing_data(listing_data: dict) -> None:
 
     status = listing_data.get("parsing_status")
     if status == "success":
-        print(listing_data.keys())
+        result: dict = {"apartments": dict(), "listings": dict(), "price_history": dict()}
+        result["apartments"]["property_type"] = listing_data.get("offer", dict()).get("offerType", "")
+        result["apartments"]["flat_type"] = listing_data.get("offer", dict()).get("flatType", "")
+        result["apartments"]["total_area"] = float(listing_data.get("offer", dict()).get("totalArea", 0))
+        result["apartments"]["rooms_count"] = listing_data.get("offer", dict()).get("roomsCount", 1)
+        result["apartments"]["floor_number"] = listing_data.get("offer", dict()).get("floorNumber", 1)
+        result["apartments"]["floors_count"] = (
+            listing_data.get("offer", dict()).get("building", dict()).get("floorsCount")
+        )
+        specifications = listing_data.get("newObject", dict()).get("specifications", list())
+        result["apartments"]["building_material"] = None
+        for spec in specifications:
+            material_key = spec.get("title").lower()
+            if material_key in ["тип дома"]:
+                result["apartments"]["building_material"] = spec.get("value")
+        ceiling_height = listing_data.get("offer", dict()).get("building", dict()).get("ceilingHeight")
+        if ceiling_height is not None:
+            result["apartments"]["ceiling_height"] = float(ceiling_height)
+        else:
+            result["apartments"]["ceiling_height"] = ceiling_height
+        result["apartments"]["year_built"] = (
+            listing_data.get("offer", dict()).get("building", dict()).get("deadline", dict()).get("year")
+        )
+        result["apartments"]["is_from_builder"] = (
+            str(listing_data.get("offer", dict()).get("isFromBuilder")).lower() == "true"
+        )
+        result["apartments"]["is_complete_building"] = (
+            str(
+                listing_data.get("offer", dict()).get("building", dict()).get("deadline", dict()).get("isComplete")
+            ).lower()
+            == "true"
+        )
+        result["apartments"]["builder_name"] = listing_data.get("company", dict()).get("name")
+        result["apartments"]["cian_builder_id"] = listing_data.get("company", dict()).get("id")
+
+        address_list = listing_data.get("offer", dict()).get("geo", dict()).get("address", list())
+        for index in address_list:
+            if index.get("type") == "location" and index.get("locationTypeId") == 1:
+                result["apartments"]["city"] = index.get("name")
+            elif index.get("type") == "raion":
+                result["apartments"]["district"] = index.get("name")
+            elif index.get("type") == "street":
+                result["apartments"]["street"] = index.get("name")
+            elif index.get("type") == "house":
+                result["apartments"]["building_number"] = index.get("name")
+                result["apartments"]["cian_building_code"] = index.get("id")
+
+        result["listings"]["listing_type"] = listing_data.get("offer", dict()).get("dealType", "")
+        result["listings"]["cian_listing_id"] = listing_data.get("offer", dict()).get("id")
+        result["listings"]["total_rur_price"] = listing_data.get("offer", dict()).get("priceTotalRur")
+        result["listings"]["listing_price"] = (
+            listing_data.get("offer", dict()).get("bargainTerms", dict()).get("price")
+        )
+        result["listings"]["currency_code"] = (
+            listing_data.get("offer", dict()).get("bargainTerms", dict()).get("currency")
+        )
+        result["listings"]["source"] = listing_data.get("source")
+        result["listings"]["url"] = listing_data.get("url")
+        result["listings"]["created_at"] = listing_data.get("offer", dict()).get("creationDate")
+        result["listings"]["updated_at"] = listing_data.get("offer", dict()).get("editDate")
+        result["listings"]["photos_count"] = len(listing_data.get("offer", dict()).get("photos", list()))
+
+        result["price_history"]["changes"] = [
+            {
+                "price": change.get("priceData", dict()).get("price"),
+                "currency_code": change.get("priceData", dict()).get("currency"),
+                "recorded_at": change.get("changeTime"),
+            }
+            for change in listing_data.get("priceChanges", list())
+        ]
+        logger.info("Данные успешно очищены")
+        with open(f"apartment_{result['listings']['cian_listing_id']}.json", "w", encoding="utf-8") as file:
+            json.dump(result, file, ensure_ascii=False, indent=4)
 
 
 async def get_data() -> None:
@@ -125,23 +212,31 @@ async def get_data() -> None:
     explored = set()
     to_explore = list()
     async with session:
-        data = await get_listing_data(session, START_ID)
+        data = await get_listing_data(session, START_ID, True)
         clean_listing_data(data)
         additional_ids = data.get("additional_offers", list())
         to_explore.extend(additional_ids)
         random_sleep = randint(1, MAX_WAIT)
+        logger.info("Произвольное время ожидания перед следующим запросом %d секунд", random_sleep)
         await asyncio.sleep(random_sleep)
         while len(to_explore) > 0:
-            next_id = to_explore.pop(-1)
+            if len(to_explore) < 10:
+                next_id = to_explore.pop(0)
+                update = True
+            else:
+                next_id = to_explore.pop(-1)
+                update = False
             explored.add(next_id)
-            data = await get_listing_data(session, next_id)
+            data = await get_listing_data(session, next_id, update)
             status = data.get("parsing_status")
             if status == "forbidden":
                 break
             clean_listing_data(data)
-            additional_ids = set(data.get("additional_offers", list())).difference(explored)
-            to_explore.extend(list(additional_ids))
+            if update:
+                additional_ids = set(data.get("additional_offers", list())).difference(explored)
+                to_explore.extend(list(additional_ids))
             random_sleep = randint(1, MAX_WAIT)
+            logger.info("Произвольное время ожидания перед следующим запросом %d секунд", random_sleep)
             await asyncio.sleep(random_sleep)
 
 
