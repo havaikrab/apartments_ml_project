@@ -815,6 +815,21 @@ files = [
 ]
 
 [[package]]
+name = "python-dotenv"
+version = "1.2.3"
+description = "Read key-value pairs from a .env file and set them as environment variables"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "python_dotenv-1.2.3-py3-none-any.whl", hash = "sha256:904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9"},
+    {file = "python_dotenv-1.2.3.tar.gz", hash = "sha256:a20a594dabeaa385725aa239d5244871c143ecb356add8a20fcf23773a6c3a35"},
+]
+
+[package.extras]
+cli = ["click (>=5.0)"]
+
+[[package]]
 name = "pytokens"
 version = "0.4.1"
 description = "A Fast, spec compliant Python 3.14+ tokenizer that runs on older Pythons."
@@ -1188,4 +1203,4 @@ websockets = ">=14.0"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13"
-content-hash = "b7da332ff865065f870ab0f46ad48b30b4d2555cc986084029a08a701920722a"
+content-hash = "e92b4c199cdf60b5990b1283dbf4a69aa3bd305864accacee2e89b0398e695ee"

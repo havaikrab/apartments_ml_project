@@ -136,7 +136,7 @@ def clean_listing_data(listing_data: dict) -> None:
         result["apartments"]["total_area"] = float(listing_data.get("offer", dict()).get("totalArea", 0))
         result["apartments"]["rooms_count"] = listing_data.get("offer", dict()).get("roomsCount", 1)
         result["apartments"]["floor_number"] = listing_data.get("offer", dict()).get("floorNumber", 1)
-        result["apartments"]["floors_count"] = (
+        result["apartments"]["total_floors"] = (
             listing_data.get("offer", dict()).get("building", dict()).get("floorsCount")
         )
         specifications = listing_data.get("newObject", dict()).get("specifications", list())
