@@ -87,12 +87,28 @@ class DBConnection:
 
         self.connection.close()
 
+    def insert(self, table_name: str, data: dict, return_values: Optional[tuple | list] = None) -> list:
+        """Записывает строку данных в таблицу. Принимает аргументы:
+        - table_name - строка с названием таблицы
+        - data - словарь, в котором ключи являются названиям колонок для соответствующих значений
+        - return_values - опционально, список или кортеж с названиями колонок,
+            значения которых нужно вернуть, после записи новой строки в таблицу
+        """
+
+        sql_string = f"INSERT INTO {table_name} ({', '.join(list(data.keys()))}) VALUES({(len(data) * '?, ')[: -2]})"
+        if isinstance(return_values, tuple | list) and len(return_values) > 0:
+            return_string = " RETURNING " + ", ".join(return_values)
+            sql_string += return_string
+        elif return_values is not None:
+            raise TypeError("Возвращаемые значения указаны некорректно")
+        return self.connection.execute(sql_string, tuple(data.values())).fetchall()
+
 
 if __name__ == "__main__":
     data_base_name = os.getenv("DB_NAME", "../apartments.db")
-    qwert = DBConnection("../apartments.db")
-    with qwert:
-        qwert.create_table(
+    db_connection = DBConnection("../apartments.db")
+    with db_connection:
+        db_connection.create_table(
             "apartments",
             {
                 "id": "INTEGER",
@@ -119,7 +135,7 @@ if __name__ == "__main__":
             not_null=("id", "total_area"),
             unique=("id",),
         )
-        qwert.create_table(
+        db_connection.create_table(
             "listings",
             {
                 "id": "INTEGER",
@@ -138,9 +154,9 @@ if __name__ == "__main__":
             primary_key=("id",),
             foreign_keys={"apartment_id": ("apartments", "id")},
             not_null=("id", "cian_listing_id", "apartment_id"),
-            unique=("id", "cian_listing_id", "apartment_id"),
+            unique=("id",),
         )
-        qwert.create_table(
+        db_connection.create_table(
             "price_history",
             {
                 "id": "INTEGER",
@@ -152,5 +168,5 @@ if __name__ == "__main__":
             primary_key=("id",),
             foreign_keys={"listing_id": ("listings", "id")},
             not_null=("id", "listing_id"),
-            unique=("id", "listing_id"),
+            unique=("id",),
         )

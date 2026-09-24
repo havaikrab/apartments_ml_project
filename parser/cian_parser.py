@@ -8,6 +8,8 @@ import zendriver as zd
 from bs4 import BeautifulSoup
 from curl_cffi import AsyncSession, requests
 
+from data_base.cian_data_manager import save_cian_data
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
@@ -19,8 +21,8 @@ COOKIES_FILE = "browser/cookies.json"
 HEADERS_FILE = "browser/headers.json"
 LISTING_TYPE = "sale"
 PROPERTY_TYPE = "flat"
-START_ID = 329888192
-MAX_WAIT = 10
+START_ID = 333226424
+MAX_WAIT = 20
 
 
 async def get_browser_attributes() -> None:
@@ -125,12 +127,12 @@ async def get_listing_data(session: AsyncSession, listing_id: int, update: bool)
     return {"parsing_status": "empty_response"}
 
 
-def clean_listing_data(listing_data: dict) -> None:
+def clean_listing_data(listing_data: dict) -> dict:
     """Извлекает необходимую информацию из словаря-объявления"""
 
     status = listing_data.get("parsing_status")
     if status == "success":
-        result: dict = {"apartments": dict(), "listings": dict(), "price_history": dict()}
+        result: dict = {"apartments": dict(), "listings": dict(), "price_history": list()}
         result["apartments"]["property_type"] = listing_data.get("offer", dict()).get("offerType", "")
         result["apartments"]["flat_type"] = listing_data.get("offer", dict()).get("flatType", "")
         result["apartments"]["total_area"] = float(listing_data.get("offer", dict()).get("totalArea", 0))
@@ -162,8 +164,13 @@ def clean_listing_data(listing_data: dict) -> None:
             ).lower()
             == "true"
         )
-        result["apartments"]["builder_name"] = listing_data.get("company", dict()).get("name")
-        result["apartments"]["cian_builder_id"] = listing_data.get("company", dict()).get("id")
+
+        result["apartments"]["builder_name"] = None  # Пришло None в "company"
+        result["apartments"]["cian_builder_id"] = None  # Пришло None в "company"
+        company = listing_data.get("company", dict())  # Пришло None в "company"
+        if company is not None:  # Пришло None в "company"
+            result["apartments"]["builder_name"] = company.get("name")  # Пришло None в "company"
+            result["apartments"]["cian_builder_id"] = company.get("id")  # Пришло None в "company"
 
         address_list = listing_data.get("offer", dict()).get("geo", dict()).get("address", list())
         for index in address_list:
@@ -192,7 +199,7 @@ def clean_listing_data(listing_data: dict) -> None:
         result["listings"]["updated_at"] = listing_data.get("offer", dict()).get("editDate")
         result["listings"]["photos_count"] = len(listing_data.get("offer", dict()).get("photos", list()))
 
-        result["price_history"]["changes"] = [
+        result["price_history"] = [
             {
                 "price": change.get("priceData", dict()).get("price"),
                 "currency_code": change.get("priceData", dict()).get("currency"),
@@ -201,8 +208,8 @@ def clean_listing_data(listing_data: dict) -> None:
             for change in listing_data.get("priceChanges", list())
         ]
         logger.info("Данные успешно очищены")
-        with open(f"apartment_{result['listings']['cian_listing_id']}.json", "w", encoding="utf-8") as file:
-            json.dump(result, file, ensure_ascii=False, indent=4)
+        return result
+    return dict()
 
 
 async def get_data() -> None:
@@ -213,7 +220,8 @@ async def get_data() -> None:
     to_explore = list()
     async with session:
         data = await get_listing_data(session, START_ID, True)
-        clean_listing_data(data)
+        cleaned_data = clean_listing_data(data)
+        save_cian_data(cleaned_data)
         additional_ids = data.get("additional_offers", list())
         to_explore.extend(additional_ids)
         random_sleep = randint(1, MAX_WAIT)
@@ -231,7 +239,8 @@ async def get_data() -> None:
             status = data.get("parsing_status")
             if status == "forbidden":
                 break
-            clean_listing_data(data)
+            cleaned_data = clean_listing_data(data)
+            save_cian_data(cleaned_data)
             if update:
                 additional_ids = set(data.get("additional_offers", list())).difference(explored)
                 to_explore.extend(list(additional_ids))
