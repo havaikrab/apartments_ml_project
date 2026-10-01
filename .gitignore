@@ -1,2 +1,6 @@
 .venv/
 .idea/
+.env
+*.db
+/browser
+*__pycache__
