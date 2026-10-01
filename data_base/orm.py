@@ -2,6 +2,7 @@ import os
 import sqlite3
 from typing import Optional
 
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -102,6 +103,12 @@ class DBConnection:
         elif return_values is not None:
             raise TypeError("Возвращаемые значения указаны некорректно")
         return self.connection.execute(sql_string, tuple(data.values())).fetchall()
+
+    def select(self, table_name: str) -> pd.DataFrame:
+        """Возвращает DataFrame объект - копию указанной таблицы"""
+
+        query = f"SELECT * FROM {table_name}"
+        return pd.read_sql_query(query, self.connection)
 
 
 if __name__ == "__main__":

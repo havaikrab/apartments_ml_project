@@ -21,7 +21,7 @@ COOKIES_FILE = "browser/cookies.json"
 HEADERS_FILE = "browser/headers.json"
 LISTING_TYPE = "sale"
 PROPERTY_TYPE = "flat"
-START_ID = 333226424
+START_ID = 334293594
 MAX_WAIT = 20
 
 
@@ -197,8 +197,10 @@ def clean_listing_data(listing_data: dict) -> dict:
         result["listings"]["url"] = listing_data.get("url")
         result["listings"]["created_at"] = listing_data.get("offer", dict()).get("creationDate")
         result["listings"]["updated_at"] = listing_data.get("offer", dict()).get("editDate")
-        result["listings"]["photos_count"] = len(listing_data.get("offer", dict()).get("photos", list()))
-
+        result["listings"]["photos_count"] = None  # Пришло None в len()
+        photos = listing_data.get("offer", dict()).get("photos", list())  # Пришло None в len()
+        if photos is not None:  # Пришло None в len()
+            result["listings"]["photos_count"] = len(photos)  # Пришло None в len()
         result["price_history"] = [
             {
                 "price": change.get("priceData", dict()).get("price"),
