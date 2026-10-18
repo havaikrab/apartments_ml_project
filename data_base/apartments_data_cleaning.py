@@ -7,7 +7,7 @@ from data_base.orm import DBConnection
 
 logger = logging.getLogger()
 pd.set_option("display.max_columns", 33)
-pd.set_option("display.width", 100)
+pd.set_option("display.width", 300)
 
 EXPECTED_CURRENCY = "rur"
 DEAL_TYPE = "sale"
@@ -73,7 +73,7 @@ def filter_by_property_type(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def set_base_price(data: pd.DataFrame) -> pd.DataFrame:
-    """Определяет последнюю цену, заявленную в объявлении"""
+    """Определяет последнюю цену, указанную в объявлении"""
 
     uncertain_rows = (
         data["last_price"].notna()
@@ -92,6 +92,26 @@ def drop_listing_duplicates(data: pd.DataFrame) -> pd.DataFrame:
     data = data.sort_values(["cian_listing_id", "last_update"], ascending=[True, True])
     data = data.drop_duplicates("cian_listing_id", keep="last")
     data = data.drop(columns=["last_update"])
+    return data
+
+
+def check_builders(data: pd.DataFrame) -> pd.DataFrame:
+    """Проверяет корректность заполнения сведений о застройщике"""
+
+    builders_data = data[["cian_builder_id", "builder_name"]].copy()
+    no_builder_id = builders_data["cian_builder_id"].isna() & builders_data["builder_name"].notna()
+    if no_builder_id.sum() > 0:
+        logger.warning(
+            "Обнаружены застройщики без уникального идентификатора: %s",
+            ", ".join(list(builders_data[no_builder_id]["builder_name"].dropna().unique())),
+        )
+        logger.warning("Необходима диагностика базы данных")
+    grouped_by_id = builders_data.groupby("cian_builder_id").agg(set).reset_index()
+    grouped_by_id["names_count"] = grouped_by_id["builder_name"].map(lambda x: len(x))
+    if (grouped_by_id["names_count"] > 1).sum() > 0:
+        duplicates = grouped_by_id[grouped_by_id["names_count"] > 1]["cian_builder_id"].dropna().unique()
+        logger.error("Обнаружены дубликаты уникального идентификатора застройщика: %s", ", ".join(list(duplicates)))
+        logger.warning("Необходима диагностика базы данных")
     return data
 
 
@@ -120,6 +140,8 @@ def detect_suspicion_price(data: pd.DataFrame) -> pd.DataFrame:
         len(suspicious_listings),
     )
     data = data[~data["listing_id"].isin(suspicious_listings)]
+    single_records = data.drop_duplicates(subset="listing_id", keep=False).index
+    data.loc[single_records, "suspicious_status"] = "single_record"
     return data
 
 
@@ -168,18 +190,19 @@ def get_original_listings(
 def clean_listings_data(data: pd.DataFrame) -> pd.DataFrame:
     """Очищает исходные данные"""
 
-    data = data.copy()
     data = currency_cleaner(data)
     data = filter_by_deal_type(data)
     data = no_price_filter(data)
     data = filter_by_property_type(data)
     data = set_base_price(data)
     data = drop_listing_duplicates(data)
+    data = check_builders(data)
     return data
 
 
 def suppose_missing_cities(data: pd.DataFrame) -> pd.DataFrame:
-    """Устанавливает вероятное значение в столбце "city" для объявлений с пропущенным названием города"""
+    """Работа функции основана на заполнении пропусков одинаковыми значениями
+    последней и следующей непустой записи. Для текущего парсера может быть полезной."""
 
     data = data.sort_values("listing_id")
     data["is_original_city"] = data["city"].notna()
@@ -188,3 +211,20 @@ def suppose_missing_cities(data: pd.DataFrame) -> pd.DataFrame:
     same_neighbors = data["city"].isna() & (previous_city == next_city)
     data.loc[same_neighbors, "city"] = previous_city.loc[same_neighbors]
     return data
+
+
+def aggregate_noted_cities(series: pd.Series) -> dict[str, float]:
+    """Собирает встретившиеся названия городов в словарь с указанием
+    отношения числа вхождений каждого уникального названия города к общему числу записей"""
+
+    total_sum = series.value_counts().sum()
+    return (series.value_counts() / total_sum).to_dict()
+
+
+def get_city_candidates_by_sign(data: pd.DataFrame, sign: str) -> pd.DataFrame:
+    """Возвращает DataFrame-объект, содержащий значение признака и словарь с городами,
+    которым может соответствовать данное значение признака"""
+
+    noticed_sign_values = data[data["city"].isna()][sign].dropna().unique()
+    candidates_data = data[data[sign].isin(noticed_sign_values) & data["city"].notna()][["city", sign]].copy()
+    return candidates_data.groupby(sign).agg(candidates=("city", aggregate_noted_cities)).reset_index()
