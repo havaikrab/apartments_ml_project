@@ -218,7 +218,7 @@ def aggregate_noted_cities(series: pd.Series) -> dict[str, float]:
     отношения числа вхождений каждого уникального названия города к общему числу записей"""
 
     total_sum = series.value_counts().sum()
-    return (series.value_counts() / total_sum).to_dict()
+    return cast(dict, (series.value_counts() / total_sum).to_dict())
 
 
 def get_city_candidates_by_sign(data: pd.DataFrame, sign: str) -> pd.DataFrame:
@@ -227,4 +227,6 @@ def get_city_candidates_by_sign(data: pd.DataFrame, sign: str) -> pd.DataFrame:
 
     noticed_sign_values = data[data["city"].isna()][sign].dropna().unique()
     candidates_data = data[data[sign].isin(noticed_sign_values) & data["city"].notna()][["city", sign]].copy()
-    return candidates_data.groupby(sign).agg(candidates=("city", aggregate_noted_cities)).reset_index()
+    return cast(
+        pd.DataFrame, candidates_data.groupby(sign).agg(candidates=("city", aggregate_noted_cities)).reset_index()
+    )
