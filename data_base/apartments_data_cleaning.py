@@ -221,12 +221,21 @@ def aggregate_noted_cities(series: pd.Series) -> dict[str, float]:
     return cast(dict, (series.value_counts() / total_sum).to_dict())
 
 
-def get_city_candidates_by_sign(data: pd.DataFrame, sign: str) -> pd.DataFrame:
-    """Возвращает DataFrame-объект, содержащий значение признака и словарь с городами,
-    которым может соответствовать данное значение признака"""
+def add_city_candidates_groups(data: pd.DataFrame, signs_list: list) -> pd.DataFrame:
+    """Расширяет полученный DataFrame-объект имеющий пропуски городов
+    группами кандидатов и наиболее вероятным кандидатом для заполнения от каждого из признаков в переданном списке"""
 
-    noticed_sign_values = data[data["city"].isna()][sign].dropna().unique()
-    candidates_data = data[data[sign].isin(noticed_sign_values) & data["city"].notna()][["city", sign]].copy()
-    return cast(
-        pd.DataFrame, candidates_data.groupby(sign).agg(candidates=("city", aggregate_noted_cities)).reset_index()
-    )
+    for sign in signs_list:
+        noticed_sign_values = data[data["city"].isna()][sign].dropna().unique()
+        candidates_data = data[data[sign].isin(noticed_sign_values) & data["city"].notna()][["city", sign]].copy()
+        candidates_column_name = f"candidates_by_{sign}"
+        sign_group = (
+            candidates_data.groupby(sign)
+            .agg(**{candidates_column_name: ("city", aggregate_noted_cities)})
+            .reset_index()
+        )
+        sign_group[f"candidate_by_{sign}"] = sign_group[candidates_column_name].map(
+            lambda x: max(x.keys(), key=lambda y: x[y])
+        )
+        data = data.merge(sign_group, how="left", on=sign)
+    return data
