@@ -5,13 +5,16 @@ import pandas as pd
 
 from data_base.orm import DBConnection
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+
 pd.set_option("display.max_columns", 33)
 pd.set_option("display.width", 300)
 
 EXPECTED_CURRENCY = "rur"
 DEAL_TYPE = "sale"
 PROPERTY_TYPE = "flat"
+GEOGRAPHIC_SIGNS = ["city", "district", "street", "building_number"]
 
 
 def show_missed(data: pd.DataFrame) -> None:
@@ -92,6 +95,54 @@ def drop_listing_duplicates(data: pd.DataFrame) -> pd.DataFrame:
     data = data.sort_values(["cian_listing_id", "last_update"], ascending=[True, True])
     data = data.drop_duplicates("cian_listing_id", keep="last")
     data = data.drop(columns=["last_update"])
+    return data
+
+
+def check_cian_building_code_uniqueness(data: pd.DataFrame) -> bool:
+    """Проверяет, что каждому значению cian_building_code
+    соответствует ровно одно значение из остальных географических признаков"""
+
+    success = True
+    for sign in GEOGRAPHIC_SIGNS:
+        filled_data = data[[sign, "cian_building_code"]].copy().dropna()
+        grouped_data = filled_data.groupby("cian_building_code").nunique()
+        ambiguous = grouped_data[grouped_data[sign] != 1].reset_index()
+        if len(ambiguous) > 0:
+            if success:
+                logger.error("Автоматическое восстановление географических признаков по cian_building_code отменено")
+                success = False
+            logger.warning(
+                """%d значений cian_building_code имеют неоднозначный географический признак %s:\n%s
+            Необходима диагностика базы данных""",
+                len(ambiguous),
+                sign,
+                ", ".join(map(str, list(ambiguous["cian_building_code"]))),
+            )
+    if success:
+        logger.info("""Для признака cian_building_code подтверждена уникальность собственных географических признаков.
+        Часть географических признаков будет автоматически восстановлена с помощью cian_building_code""")
+    return success
+
+
+def recover_by_cian_building_code(data: pd.DataFrame) -> pd.DataFrame:
+    """Частично восстанавливает пропуски географических признаков по значению cian_building_code"""
+
+    for sign in GEOGRAPHIC_SIGNS:
+        missed = data[sign].isna().sum()
+        filled_data = data[["cian_building_code", sign]].copy().dropna()
+        sign_guide = filled_data.groupby("cian_building_code")[sign].agg(["nunique", "first"]).sort_index()
+        if len(sign_guide["nunique"].value_counts()) > 1:
+            raise ValueError("Обнаружены неуникальные географические признаки для cian_building_code")
+        relations = sign_guide["first"]
+        to_recover = data["cian_building_code"].notna() & data[sign].isna()
+        data.loc[to_recover, sign] = data.loc[to_recover, "cian_building_code"].map(relations)
+        recovered = missed - data[sign].isna().sum()
+        if recovered > 0:
+            logger.info(
+                "Восстановлено %d пропусков признака %s на основании уникальности признака cian_building_code",
+                recovered,
+                sign,
+            )
     return data
 
 
@@ -190,6 +241,8 @@ def get_original_listings(
 def clean_listings_data(data: pd.DataFrame) -> pd.DataFrame:
     """Очищает исходные данные"""
 
+    if check_cian_building_code_uniqueness(data):
+        recover_by_cian_building_code(data)
     data = currency_cleaner(data)
     data = filter_by_deal_type(data)
     data = no_price_filter(data)
@@ -213,29 +266,15 @@ def suppose_missing_cities(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def aggregate_noted_cities(series: pd.Series) -> dict[str, float]:
-    """Собирает встретившиеся названия городов в словарь с указанием
-    отношения числа вхождений каждого уникального названия города к общему числу записей"""
+def get_sign_relations(data: pd.DataFrame, first_sign: str, second_sign: str) -> pd.DataFrame:
+    """Возвращает "справочник", содержащий сведения о частоте встречающихся значений второго признака
+    для каждого уникального значения первого признака"""
 
-    total_sum = series.value_counts().sum()
-    return cast(dict, (series.value_counts() / total_sum).to_dict())
-
-
-def add_city_candidates_groups(data: pd.DataFrame, signs_list: list) -> pd.DataFrame:
-    """Расширяет полученный DataFrame-объект имеющий пропуски городов
-    группами кандидатов и наиболее вероятным кандидатом для заполнения от каждого из признаков в переданном списке"""
-
-    for sign in signs_list:
-        noticed_sign_values = data[data["city"].isna()][sign].dropna().unique()
-        candidates_data = data[data[sign].isin(noticed_sign_values) & data["city"].notna()][["city", sign]].copy()
-        candidates_column_name = f"candidates_by_{sign}"
-        sign_group = (
-            candidates_data.groupby(sign)
-            .agg(**{candidates_column_name: ("city", aggregate_noted_cities)})
-            .reset_index()
-        )
-        sign_group[f"candidate_by_{sign}"] = sign_group[candidates_column_name].map(
-            lambda x: max(x.keys(), key=lambda y: x[y])
-        )
-        data = data.merge(sign_group, how="left", on=sign)
-    return data
+    filled_data = data[data[first_sign].notna() & data[second_sign].notna()].copy()
+    first_sign_groups = (
+        filled_data[[first_sign, second_sign]]
+        .groupby(first_sign)
+        .value_counts(subset=[second_sign], normalize=True)
+        .reset_index()
+    )
+    return cast(pd.DataFrame, first_sign_groups)

@@ -76,8 +76,6 @@ if __name__ == "__main__":
                 "data_size": "INTEGER",
                 "test_data_part": "REAL",
                 "launches_count": "INTEGER",
-                "efficiency_by_cian_building_code": "REAL",
-                "accuracy_by_cian_building_code": "REAL",
                 "efficiency_by_cian_builder_id": "REAL",
                 "accuracy_by_cian_builder_id": "REAL",
                 "efficiency_by_builder_name": "REAL",
