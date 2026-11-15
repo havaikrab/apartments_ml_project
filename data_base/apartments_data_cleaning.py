@@ -5,23 +5,26 @@ import pandas as pd
 
 from data_base.orm import DBConnection
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+
 pd.set_option("display.max_columns", 33)
-pd.set_option("display.width", 170)
+pd.set_option("display.width", 300)
 
 EXPECTED_CURRENCY = "rur"
 DEAL_TYPE = "sale"
 PROPERTY_TYPE = "flat"
+GEOGRAPHIC_SIGNS = ["city", "district", "street", "building_number"]
 
 
-def show_missed(data: pd.DataFrame) -> None:
-    """Показывает статистику пропущенных значений"""
+def show_missed(data: pd.DataFrame) -> pd.DataFrame:
+    """Возвращает статистику пропущенных значений"""
 
     missed_total = data.isna().sum()
     missed_percent = data.isna().mean() * 100
     missed = pd.concat({"missed_total": missed_total, "missed_percent": missed_percent}, axis=1)
     missed = missed[missed["missed_total"] > 0].round(2).sort_values("missed_total", ascending=False)
-    print(missed)
+    return cast(pd.DataFrame, missed)
 
 
 def currency_cleaner(data: pd.DataFrame) -> pd.DataFrame:
@@ -51,7 +54,7 @@ def filter_by_deal_type(data: pd.DataFrame) -> pd.DataFrame:
 def no_price_filter(data: pd.DataFrame) -> pd.DataFrame:
     """Очищает DataFrame от строк без указания цены сделки"""
 
-    no_price = data["total_rur_price"].isna()
+    no_price = data["total_rur_price"].isna() & data["last_price"].isna()
     if no_price.sum() > 0:
         logger.warning(
             "Обнаружено %d строк без указания цены сделки, данные строки не будут учтены в расчетах.",
@@ -72,21 +75,147 @@ def filter_by_property_type(data: pd.DataFrame) -> pd.DataFrame:
     return cast(pd.DataFrame, data[~unexpected])
 
 
+def set_base_price(data: pd.DataFrame) -> pd.DataFrame:
+    """Определяет последнюю цену, указанную в объявлении"""
+
+    uncertain_rows = (
+        data["last_price"].notna()
+        & (data["total_rur_price"] != data["last_price"])
+        & ((data["updated_at"] < data["price_updated_at"]) | data["updated_at"].isna())
+    )
+    data["price"] = data["total_rur_price"]
+    data.loc[uncertain_rows, "price"] = data["last_price"]
+    return data.drop(["total_rur_price", "last_price", "listing_price"], axis=1)
+
+
+def drop_listing_duplicates(data: pd.DataFrame) -> pd.DataFrame:
+    """Удаляет дубликаты оригинальных объявлений"""
+
+    data["last_update"] = data[["updated_at", "price_updated_at"]].agg("max", axis=1)
+    data = data.sort_values(["cian_listing_id", "last_update"], ascending=[True, True])
+    data = data.drop_duplicates("cian_listing_id", keep="last")
+    data = data.drop(columns=["last_update"])
+    return data
+
+
+def check_cian_building_code_uniqueness(data: pd.DataFrame) -> bool:
+    """Проверяет, что каждому значению cian_building_code
+    соответствует ровно одно значение из остальных географических признаков"""
+
+    success = True
+    for sign in GEOGRAPHIC_SIGNS:
+        filled_data = data[[sign, "cian_building_code"]].copy().dropna()
+        grouped_data = filled_data.groupby("cian_building_code").nunique()
+        ambiguous = grouped_data[grouped_data[sign] != 1].reset_index()
+        if len(ambiguous) > 0:
+            if success:
+                logger.error("Автоматическое восстановление географических признаков по cian_building_code отменено")
+                success = False
+            logger.warning(
+                """%d значений cian_building_code имеют неоднозначный географический признак %s:\n%s
+            Необходима диагностика базы данных""",
+                len(ambiguous),
+                sign,
+                ", ".join(map(str, list(ambiguous["cian_building_code"]))),
+            )
+    if success:
+        logger.info("""Для признака cian_building_code подтверждена уникальность собственных географических признаков.
+        Часть географических признаков будет автоматически восстановлена с помощью cian_building_code""")
+    return success
+
+
+def recover_by_cian_building_code(data: pd.DataFrame) -> pd.DataFrame:
+    """Частично восстанавливает пропуски географических признаков по значению cian_building_code"""
+
+    for sign in GEOGRAPHIC_SIGNS:
+        missed = data[sign].isna().sum()
+        filled_data = data[["cian_building_code", sign]].copy().dropna()
+        sign_guide = filled_data.groupby("cian_building_code")[sign].agg(["nunique", "first"]).sort_index()
+        if len(sign_guide["nunique"].value_counts()) > 1:
+            raise ValueError("Обнаружены неуникальные географические признаки для cian_building_code")
+        relations = sign_guide["first"]
+        to_recover = data["cian_building_code"].notna() & data[sign].isna()
+        data.loc[to_recover, sign] = data.loc[to_recover, "cian_building_code"].map(relations)
+        recovered = missed - data[sign].isna().sum()
+        if recovered > 0:
+            logger.info(
+                "Восстановлено %d пропусков признака %s на основании уникальности признака cian_building_code",
+                recovered,
+                sign,
+            )
+    return data
+
+
+def check_builders(data: pd.DataFrame) -> pd.DataFrame:
+    """Проверяет корректность заполнения сведений о застройщике"""
+
+    builders_data = data[["cian_builder_id", "builder_name"]].copy()
+    no_builder_id = builders_data["cian_builder_id"].isna() & builders_data["builder_name"].notna()
+    if no_builder_id.sum() > 0:
+        logger.warning(
+            "Обнаружены застройщики без уникального идентификатора: %s",
+            ", ".join(list(builders_data[no_builder_id]["builder_name"].dropna().unique())),
+        )
+        logger.warning("Необходима диагностика базы данных")
+    grouped_by_id = builders_data.groupby("cian_builder_id").agg(set).reset_index()
+    grouped_by_id["names_count"] = grouped_by_id["builder_name"].map(lambda x: len(x))
+    if (grouped_by_id["names_count"] > 1).sum() > 0:
+        duplicates = grouped_by_id[grouped_by_id["names_count"] > 1]["cian_builder_id"].dropna().unique()
+        logger.error("Обнаружены дубликаты уникального идентификатора застройщика: %s", ", ".join(list(duplicates)))
+        logger.warning("Необходима диагностика базы данных")
+    return data
+
+
+def detect_suspicion_price(data: pd.DataFrame) -> pd.DataFrame:
+    """Проверяет историю изменения цен на наличие подозрительных записей"""
+
+    data["recorded_at"] = pd.to_datetime(data["recorded_at"], format="mixed", utc=True)
+    data = data.sort_values(["listing_id", "recorded_at"]).reset_index(drop=True)
+    set_nan = data.drop_duplicates(subset="listing_id", keep="first").index
+    previous_price = data["price"].shift()
+    previous_price.iloc[set_nan] = None
+    data["previous_price"] = previous_price
+    data["total_price_diff"] = data["price"] - data["previous_price"]
+    data["price_diff_grade"] = abs(data["total_price_diff"] / data[["price", "previous_price"]].agg("min", axis=1))
+    data["suspicious_status"] = "valid"
+    diff_stats = data["price_diff_grade"].describe()
+    suspiciously = data["price_diff_grade"]
+    for status in ["low", "high", "extreme"]:
+        tukey_level = 2.5 * diff_stats["75%"] - 1.5 * diff_stats["25%"]
+        suspiciously = suspiciously[suspiciously > tukey_level]
+        data.loc[suspiciously.index, "suspicious_status"] = status
+        diff_stats = suspiciously.describe()
+    suspicious_listings = data[data["suspicious_status"] == "extreme"]["listing_id"].unique()
+    logger.warning(
+        "Обнаружено %d строк c подозрительным изменением цены, соответствующие объявления не будут учтены в расчетах.",
+        len(suspicious_listings),
+    )
+    data = data[~data["listing_id"].isin(suspicious_listings)]
+    single_records = data.drop_duplicates(subset="listing_id", keep=False).index
+    data.loc[single_records, "suspicious_status"] = "single_record"
+    return data
+
+
 def normalize_price_history(price_history_data: pd.DataFrame) -> pd.DataFrame:
-    """Упорядочивает изменение цены для каждого уникального объявления"""
+    """Упорядочивает изменение цены для каждого сохраненного объявления"""
 
     price_history_data = currency_cleaner(price_history_data)
+    price_history_data = detect_suspicion_price(price_history_data)
     price_history_data.sort_values(by=["listing_id", "recorded_at"], inplace=True)
     result = price_history_data.groupby("listing_id").agg(
         first_price=("price", "first"),
         last_price=("price", "last"),
         price_updated_at=("recorded_at", "last"),
-        price_changes_count=("price", "count"),
+        price_changes_count=("recorded_at", "count"),
         min_price=("price", "min"),
         max_price=("price", "max"),
+        suspicious_status=("suspicious_status", "last"),
     )
     result["price_change_percent"] = (result["last_price"] - result["first_price"]) * 100 / result["first_price"]
-    return cast(pd.DataFrame, result.reset_index().round(2))
+    result = result.reset_index()
+    numeric_columns = result.select_dtypes(include="number").columns
+    result[numeric_columns] = result[numeric_columns].round(2)
+    return cast(pd.DataFrame, result)
 
 
 def get_original_listings(
@@ -104,14 +233,49 @@ def get_original_listings(
     result = apartments.merge(listings, on="apartment_id")
     result.rename(columns={"id": "listing_id"}, inplace=True)
     result = result.merge(price_history, on="listing_id")
+    result["created_at"] = pd.to_datetime(result["created_at"], format="mixed", utc=True)
+    result["updated_at"] = pd.to_datetime(result["updated_at"], format="mixed", utc=True)
     return result
 
 
-def clean_listings_data(data: pd.DataFrame) -> pd.DataFrame:
+def clean_listings_data(original_data: pd.DataFrame) -> pd.DataFrame:
     """Очищает исходные данные"""
 
+    data = original_data.copy()
+    if check_cian_building_code_uniqueness(data):
+        recover_by_cian_building_code(data)
     data = currency_cleaner(data)
     data = filter_by_deal_type(data)
     data = no_price_filter(data)
     data = filter_by_property_type(data)
+    data = set_base_price(data)
+    data = drop_listing_duplicates(data)
+    data = check_builders(data)
     return data
+
+
+def suppose_missing_cities(data: pd.DataFrame) -> pd.DataFrame:
+    """Работа функции основана на заполнении пропусков одинаковыми значениями
+    последней и следующей непустой записи. Для текущего парсера может быть полезной."""
+
+    data = data.sort_values("listing_id")
+    data["is_original_city"] = data["city"].notna()
+    previous_city = data["city"].ffill()
+    next_city = data["city"].bfill()
+    same_neighbors = data["city"].isna() & (previous_city == next_city)
+    data.loc[same_neighbors, "city"] = previous_city.loc[same_neighbors]
+    return data
+
+
+def get_sign_relations(data: pd.DataFrame, first_sign: str, second_sign: str) -> pd.DataFrame:
+    """Возвращает "справочник", содержащий сведения о частоте встречающихся значений второго признака
+    для каждого уникального значения первого признака"""
+
+    filled_data = data[data[first_sign].notna() & data[second_sign].notna()].copy()
+    first_sign_groups = (
+        filled_data[[first_sign, second_sign]]
+        .groupby(first_sign)
+        .value_counts(subset=[second_sign], normalize=True)
+        .reset_index()
+    )
+    return cast(pd.DataFrame, first_sign_groups)
