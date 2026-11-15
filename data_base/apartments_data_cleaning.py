@@ -17,14 +17,14 @@ PROPERTY_TYPE = "flat"
 GEOGRAPHIC_SIGNS = ["city", "district", "street", "building_number"]
 
 
-def show_missed(data: pd.DataFrame) -> None:
-    """Показывает статистику пропущенных значений"""
+def show_missed(data: pd.DataFrame) -> pd.DataFrame:
+    """Возвращает статистику пропущенных значений"""
 
     missed_total = data.isna().sum()
     missed_percent = data.isna().mean() * 100
     missed = pd.concat({"missed_total": missed_total, "missed_percent": missed_percent}, axis=1)
     missed = missed[missed["missed_total"] > 0].round(2).sort_values("missed_total", ascending=False)
-    print(missed)
+    return cast(pd.DataFrame, missed)
 
 
 def currency_cleaner(data: pd.DataFrame) -> pd.DataFrame:
@@ -238,9 +238,10 @@ def get_original_listings(
     return result
 
 
-def clean_listings_data(data: pd.DataFrame) -> pd.DataFrame:
+def clean_listings_data(original_data: pd.DataFrame) -> pd.DataFrame:
     """Очищает исходные данные"""
 
+    data = original_data.copy()
     if check_cian_building_code_uniqueness(data):
         recover_by_cian_building_code(data)
     data = currency_cleaner(data)
